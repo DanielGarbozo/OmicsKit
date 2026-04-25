@@ -14,8 +14,8 @@ vignette: >
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(
-  collapse  = TRUE,
-  comment   = "#>",
+  collapse   = TRUE,
+  comment    = "#>",
   warning   = FALSE,
   message   = FALSE,
   eval      = TRUE,
@@ -144,7 +144,7 @@ downstream chunks run without internet access.
 set.seed(42)
 annotations_stub <- data.frame(
   geneID      = rownames(raw_counts),
-  symbol      = paste0("Gene_", seq_len(nrow(raw_counts))),
+  symbol      = paste0("Gen_", seq_len(nrow(raw_counts))),
   gene_length = sample(500:5000, nrow(raw_counts), replace = TRUE),
   stringsAsFactors = FALSE
 )
@@ -244,7 +244,7 @@ detectable <- detect_filter(
   norm.counts       = as.data.frame(tpm_matrix),
   df.BvsA           = deseq_sim,
   samples.baseline  = normal_ids,
-  samples.condition1= tumor_ids,
+  samples.condition1 = tumor_ids,
   cutoffs           = c(50, 50, 0)
 )
 
