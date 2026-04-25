@@ -1,0 +1,233 @@
+==============================================================================
+OmicsKit – Tutorial Speech Script
+Function-by-function explanations for presentations
+==============================================================================
+
+------------------------------------------------------------------------------
+SECTION 1: POWER ANALYSIS  (power_analysis)
+------------------------------------------------------------------------------
+
+WHAT IS STATISTICAL POWER?
+Power is the probability that an experiment will correctly detect a true
+biological effect when one exists (1 – β, where β is the false-negative rate).
+In RNA-seq, where thousands of genes are tested simultaneously, running an
+underpowered study means spending time and money only to miss real signals.
+
+HART ET AL. 2013 FRAMEWORK (RNA 20:1684-1696):
+The paper by Hart, Bhatt, and coworkers is the seminal reference for
+RNA-seq sample-size planning. They model gene-level counts with a
+Negative Binomial distribution, where the variance is driven by two
+components: Poisson shot noise (1/mean) and biological over-dispersion (σ²,
+the biological coefficient of variation squared).
+
+For a simple two-group comparison the key insight is:
+  - The standard error of the log₂FC estimate scales as √(2σ²/n).
+  - Therefore doubling the sample size n reduces the SE by a factor of √2.
+
+MULTIPLE TESTING CORRECTION:
+Because we test thousands of genes, the significance threshold per gene must
+be made much stricter. Hart et al. recommend adjusting for the number of
+truly null genes (m₀ = n_genes × (1 – prop_de)) using a Bonferroni-like
+correction:
+  z_α = Φ⁻¹(1 – α / (2 × m₀))
+This ensures FDR control even under massive multiplicity.
+
+POWER CURVE:
+Once z_α and the non-centrality parameter z_effect = |ΔL2FC| / SE(n) are
+known, power at each n is:
+  π(n) = Φ(z_effect – z_α) + Φ(–z_effect – z_α)
+The OmicsKit function sweeps n from 2 to max_n, plots the resulting power
+curve, and returns the minimum n that achieves the desired power target
+(e.g., 0.80). The red dashed line marks the power target; the blue dashed
+line marks the minimum sufficient sample size.
+
+PRACTICAL TAKEAWAY:
+Dispersion (σ²) is the most influential parameter: higher biological
+variability demands more replicates. The effect size (desired fold-change)
+is the second most influential: detecting 2× changes requires fewer samples
+than detecting 1.5× changes. The function makes these trade-offs explicit
+before data are collected.
+
+------------------------------------------------------------------------------
+SECTION 2: ANNOTATIONS
+------------------------------------------------------------------------------
+
+get_annotations:
+  Queries Ensembl BioMart to retrieve gene metadata (symbol, biotype,
+  chromosome, length) for a list of Ensembl IDs; saves the result to CSV or XLSX.
+
+add_annotations:
+  Left-joins user-selected annotation columns from a reference table into a
+  counts matrix using the Ensembl gene ID as the common key.
+
+------------------------------------------------------------------------------
+SECTION 3: TPM NORMALISATION  (tpm)
+------------------------------------------------------------------------------
+
+TPM (Transcripts Per Million) corrects simultaneously for gene length and
+library size, making expression values directly comparable within and across
+samples.
+
+------------------------------------------------------------------------------
+SECTION 4: DETECT & FILTER  (detect_filter)
+------------------------------------------------------------------------------
+
+WHY FILTER LOWLY EXPRESSED GENES?
+In a typical RNA-seq dataset, roughly a third of all annotated genes produce
+fewer than a handful of mapped reads per sample. Including these genes in
+differential expression testing inflates the number of hypotheses tested
+(increasing the multiple-testing burden), reduces statistical power for
+genes that DO matter, and can introduce artefactual fold-changes driven by
+noise rather than biology.
+
+HOW detect_filter WORKS:
+The function applies three thresholds in sequence:
+
+  1. baseMean filter – genes whose average normalised count across ALL
+     samples falls below the first cutoff value (default 50) are removed.
+     baseMean is a robust global activity measure; very low values indicate
+     the gene is not expressed in this dataset regardless of condition.
+
+  2. Group-mean filter – for each retained gene the function evaluates the
+     direction of the fold-change. If the gene is up-regulated in condition 1,
+     it checks whether the mean normalised count in condition 1 exceeds the
+     second cutoff (default 50); if it is down-regulated, it checks the
+     baseline group. This ensures that the "expressed" end of the comparison
+     is genuinely active, not just a reflection of a noisy near-zero signal.
+
+  3. Fold-change floor – genes whose |log₂FC| falls below the third cutoff
+     (default 0, meaning all non-zero LFCs pass) are also removed. Raising
+     this value focuses the analysis on genes with a minimum practical effect.
+
+MULTIPLE COMPARISONS:
+The function can process up to three pairwise comparisons simultaneously
+(df.BvsA, df.CvsA, df.DvsA). It builds the union of detectable gene IDs
+across all comparisons and returns a named list containing each filtered
+result data frame plus the DetectGenes vector.
+
+OUTPUT:
+A named list with elements Comparison1 (and optionally Comparison2,
+Comparison3) containing the filtered DEA results, and DetectGenes with the
+unique vector of detectable Ensembl IDs.
+
+------------------------------------------------------------------------------
+SECTION 5: DIMENSIONALITY REDUCTION
+------------------------------------------------------------------------------
+
+PCA (nice_PCA):
+  Principal Component Analysis performs a linear rotation of the data to find
+  axes (PCs) that maximise explained variance. PC1 and PC2 capture the most
+  global structure in the data. PCA is fast, fully deterministic, and each
+  axis has a direct interpretation as a linear combination of genes. Best
+  choice for a first exploratory pass.
+
+t-SNE (nice_tSNE):
+  t-distributed Stochastic Neighbour Embedding minimises the Kullback-Leibler
+  divergence between high-dimensional neighbourhood distributions and their
+  low-dimensional counterparts. It excels at revealing tight local clusters
+  but compresses global distances non-linearly, so inter-cluster relationships
+  should not be over-interpreted. Results depend on the perplexity parameter
+  and the random seed; axes carry no direct biological meaning.
+
+UMAP (nice_UMAP):
+  Uniform Manifold Approximation and Projection uses fuzzy topological graph
+  structure to embed data in low dimensions. Unlike t-SNE it better preserves
+  both local clusters AND some global inter-cluster geometry. UMAP is faster
+  than t-SNE on large datasets and is generally the preferred non-linear
+  method when cluster topology and relative distances both matter.
+
+WHEN TO USE EACH:
+  - PCA: always run first; interpretable axes; fast.
+  - t-SNE: fine cluster structure in smaller datasets.
+  - UMAP: large datasets; when global topology of clusters also matters.
+
+------------------------------------------------------------------------------
+SECTION 6: VIOLIN-SCATTER-BOX PLOT  (nice_VSB)
+------------------------------------------------------------------------------
+
+nice_VSB combines a violin shape, box-plot, and individual data points for a
+single gene, making it ideal for showing expression distributions per group
+at a glance.
+
+------------------------------------------------------------------------------
+SECTION 7: VOLCANO PLOT  (nice_Volcano)
+------------------------------------------------------------------------------
+
+The Volcano plot simultaneously displays fold-change magnitude (x-axis) and
+statistical significance (–log₁₀ FDR, y-axis), so that genes with both large
+and significant changes cluster visually in the top corners.
+
+------------------------------------------------------------------------------
+SECTION 8: SAVING RESULTS  (save_results)
+------------------------------------------------------------------------------
+
+save_results writes three Excel files from a DEA result data frame: all genes,
+up-regulated genes only, and down-regulated genes only.
+
+------------------------------------------------------------------------------
+SECTION 9: SPLIT CASES  (split_cases)
+------------------------------------------------------------------------------
+
+When three phenotypes are compared pairwise, genes fall into ten mutually
+exclusive expression-pattern categories (e.g., progressive up-regulation
+across conditions, condition-specific changes, no change in any comparison).
+split_cases automates this classification and returns a named list for
+downstream pathway or survival analyses.
+
+------------------------------------------------------------------------------
+SECTION 10: PATHWAY ANALYSIS WORKFLOW
+------------------------------------------------------------------------------
+
+merge_GSEA:
+  Reads all GSEA .tsv result files from a directory, standardises column
+  types, computes –log₁₀(FDR), and saves a single tidy TSV for downstream
+  plotting.
+
+barplot_GSEA:
+  Generates a faceted NES bar chart coloured by –log₁₀(FDR) for a concise
+  multi-pathway, multi-comparison summary.
+
+plot_GSEA:
+  Flexible GSEA plotting function: in multi-comparison mode it produces a
+  faceted bar chart; in single-comparison mode it assembles a full panel
+  layout with pathway labels, NES columns, MSigDB collection annotations,
+  and a colour-bar legend.
+
+------------------------------------------------------------------------------
+SECTION 11: PATHWAY CLUSTERING WORKFLOW
+------------------------------------------------------------------------------
+
+heatmap_GSEA:
+  Integrates GSEA output, gene-set GMT definitions, ranked gene lists, and
+  sample expression data to produce per-pathway leading-edge heatmaps (PDF
+  and JPEG) that show which genes drove enrichment in which samples.
+
+------------------------------------------------------------------------------
+SECTION 12: KAPLAN-MEIER SURVIVAL  (nice_KM)
+------------------------------------------------------------------------------
+
+nice_KM fits Kaplan-Meier survival curves stratified by a binary gene-status
+variable (e.g., mutated vs. wild-type), annotates the log-rank p-value, and
+handles the edge case where only one category is present by returning an
+informative placeholder plot.
+
+------------------------------------------------------------------------------
+VALIDATION CHECKS
+------------------------------------------------------------------------------
+
+For Rmd tutorials:
+  - stopifnot(exists("object_name"))   – object was created
+  - stopifnot(is.list(pa))             – power_analysis returned a list
+  - stopifnot("min_sample_size" %in% names(pa))
+  - stopifnot(all(abs(colSums(tpm_matrix) - 1e6) < 1))  – TPM sums correct
+  - stopifnot("DetectGenes" %in% names(detectable))      – filter ran
+
+For this speech file:
+  - All function names match the exported NAMESPACE of OmicsKit 1.0.0.0000.
+  - Optional code blocks are clearly labelled and wrapped in eval=FALSE.
+  - No external files are required for the runnable chunks.
+  - Power analysis section is guided by Hart et al. (2013) RNA 20:1684-1696.
+
+==============================================================================
+END OF SPEECH SCRIPT
+==============================================================================

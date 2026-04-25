@@ -1,0 +1,608 @@
+---
+title: "Tutorial Completo de OmicsKit – DEA, Análisis de Rutas y Clustering de Rutas"
+author: "Equipo OmicsKit"
+date: "`r Sys.Date()`"
+output:
+  rmarkdown::html_vignette:
+    toc: true
+    toc_depth: 3
+vignette: >
+  %\VignetteIndexEntry{Tutorial Completo de OmicsKit – DEA, Análisis de Rutas y Clustering de Rutas}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  collapse   = TRUE,
+  comment    = "#>",
+  warning    = FALSE,
+  message    = FALSE,
+  eval       = TRUE,
+  fig.width  = 7,
+  fig.height = 5
+)
+```
+
+# Introducción
+
+Este tutorial cubre los tres flujos de trabajo principales implementados en **OmicsKit**:
+
+1. **Flujo DEA (Análisis de Expresión Diferencial)** – desde conteos crudos hasta visualizaciones.
+2. **Flujo de Análisis de Rutas** – procesamiento y visualización de resultados GSEA.
+3. **Flujo de Clustering de Rutas** – heatmaps de genes del *leading edge* y agrupamiento de gene sets.
+
+Todos los ejemplos emplean los conjuntos de datos TCGA-LUAD (`raw_counts` y `sampledata`)
+incluidos en el paquete.  Las funciones que requieren archivos externos (p. ej. `merge_GSEA`,
+`heatmap_GSEA`) se presentan en bloques opcionales claramente identificados.
+
+---
+
+# 1 – Carga del paquete y datos
+
+```{r load-package}
+library(OmicsKit)
+
+# Datasets incluidos en el paquete
+data("raw_counts")   # matriz entera: genes × muestras
+data("sampledata")   # data frame: metadatos de muestras
+
+# Vista rápida
+dim(raw_counts)
+head(sampledata[, 1:5])
+```
+
+---
+
+# 2 – Flujo DEA
+
+## 2.1 Análisis de Potencia Estadística
+
+Antes de comprometer recursos en un experimento, es fundamental estimar el número mínimo
+de réplicas necesarias para detectar un efecto biológicamente relevante con suficiente
+confianza.  `power_analysis()` implementa el marco analítico de Hart *et al.* (2013,
+*RNA* **20**: 1684–1696).
+
+**Fundamentos estadísticos (Hart *et al.* 2013):**
+
+El enfoque modela los conteos RNA-seq con una distribución Binomial Negativa cuya
+varianza se parametriza mediante un coeficiente de *dispersión* (coeficiente de variación
+biológica al cuadrado, σ²).  Para una comparación de dos grupos, el error estándar del
+estimador del log₂-fold-change es:
+
+$$SE = \sqrt{\frac{2\,\sigma^2}{n}}$$
+
+donde *n* es el número de réplicas por grupo.  Bajo este modelo, el parámetro de no-centralidad
+que gobierna la potencia estadística es:
+
+$$z_{\text{efecto}} = \frac{|\Delta|}{SE} = \frac{|\Delta|}{\sqrt{2\,\sigma^2 / n}}$$
+
+Como se evalúan miles de genes simultáneamente, se requiere una corrección por pruebas
+múltiples.  Hart *et al.* recomiendan controlar la **Tasa de Falso Descubrimiento (FDR)**
+mediante un ajuste tipo Bonferroni sobre los genes nulos:
+
+$$z_\alpha = \Phi^{-1}\!\left(1 - \frac{\alpha}{2\,m_0}\right)$$
+
+donde *m*₀ es el número de genes verdaderamente no diferencialmente expresados y Φ⁻¹ es la
+función cuantil normal.  La potencia realizada para el tamaño de muestra *n* es:
+
+$$\pi(n) = \Phi\!\left(z_{\text{efecto}} - z_\alpha\right) + \Phi\!\left(-z_{\text{efecto}} - z_\alpha\right)$$
+
+`power_analysis()` recorre *n* de 2 a `max_n`, calcula π(*n*) en cada punto y reporta el
+*n* mínimo que alcanza `power_target`.  La línea roja discontinua indica la potencia deseada;
+la línea azul discontinua indica el tamaño de muestra mínimo suficiente.
+
+```{r power-analysis}
+?power_analysis
+
+pa <- power_analysis(
+  effect_size  = 1,       # log2 fold-change a detectar
+  dispersion   = 0.1,     # varianza biológica (σ²)
+  n_genes      = 20000,   # total de genes evaluados
+  prop_de      = 0.05,    # proporción esperada de genes DE
+  alpha        = 0.05,    # FDR deseado
+  power_target = 0.8,     # potencia deseada (1 – β)
+  max_n        = 20,      # tamaño máximo de muestra a explorar
+  plot         = TRUE
+)
+
+cat("Tamaño mínimo de muestra por grupo:", pa$min_sample_size, "\n")
+```
+
+```{r validate-pa}
+stopifnot(exists("pa"))
+stopifnot(is.list(pa))
+stopifnot("min_sample_size" %in% names(pa))
+stopifnot("power_table"     %in% names(pa))
+stopifnot(is.numeric(pa$min_sample_size))
+```
+
+## 2.2 Obtener Anotaciones
+
+`get_annotations()` consulta Ensembl BioMart para recuperar metadatos de genes (símbolo,
+biotipo, cromosoma, longitud) a partir de un vector de IDs Ensembl.  Requiere acceso a
+internet y el paquete `biomaRt`.
+
+```{r get-annotations, eval=FALSE}
+?get_annotations
+
+# OPCIONAL – requiere acceso a internet y el paquete biomaRt
+# annotations <- get_annotations(
+#   ensembl_ids = rownames(raw_counts),
+#   mode        = "genes",
+#   version     = "Current",
+#   filename    = "gene_annotations",
+#   format      = "csv"
+# )
+```
+
+Para el resto del tutorial usamos un objeto de anotaciones mínimo para que todos los
+bloques funcionen sin acceso a internet.
+
+```{r annotations-stub}
+# Objeto mínimo: columnas symbol y gene_length requeridas por tpm() y add_annotations()
+set.seed(42)
+annotations_stub <- data.frame(
+  geneID      = rownames(raw_counts),
+  symbol      = paste0("Gen_", seq_len(nrow(raw_counts))),
+  gene_length = sample(500:5000, nrow(raw_counts), replace = TRUE),
+  stringsAsFactors = FALSE
+)
+rownames(annotations_stub) <- annotations_stub$geneID
+```
+
+## 2.3 Agregar Anotaciones
+
+`add_annotations()` une columnas de anotación de una tabla de referencia a la matriz de
+conteos usando el ID Ensembl como clave.
+
+```{r add-annotations}
+?add_annotations
+
+counts_ann <- add_annotations(
+  object     = raw_counts,
+  reference  = annotations_stub,
+  variables  = c("symbol", "gene_length"),
+  data_frame = TRUE
+)
+
+head(counts_ann[, c("geneID", "symbol", "gene_length", colnames(raw_counts)[1:2])])
+```
+
+```{r validate-ann}
+stopifnot(exists("counts_ann"))
+stopifnot("symbol"      %in% colnames(counts_ann))
+stopifnot("gene_length" %in% colnames(counts_ann))
+```
+
+## 2.4 Normalización TPM
+
+TPM (*Transcripts Per Million*) elimina los sesgos de tamaño de librería y longitud de gen,
+haciendo los valores de expresión comparables dentro y entre muestras.
+
+```{r tpm-norm}
+?tpm
+
+tpm_matrix <- tpm(
+  raw_counts   = raw_counts,
+  gene_lengths = annotations_stub$gene_length
+)
+
+# Verificar que las sumas de columna ≈ 1 × 10⁶
+round(colSums(tpm_matrix)[1:3])
+```
+
+```{r validate-tpm}
+stopifnot(exists("tpm_matrix"))
+stopifnot(nrow(tpm_matrix) == nrow(raw_counts))
+stopifnot(ncol(tpm_matrix) == ncol(raw_counts))
+# Cada columna debe sumar ~1e6
+stopifnot(all(abs(colSums(tpm_matrix) - 1e6) < 1))
+```
+
+## 2.5 Detección y Filtrado de Genes Expresados
+
+`detect_filter()` identifica genes confiablemente detectables: un gen se conserva si su
+**baseMean** (conteo normalizado promedio entre todas las muestras) y su **media grupal**
+(media en el grupo con mayor expresión) superan ambos un umbral definido por el usuario,
+*y* su |log₂FC| está por encima de un mínimo de fold-change.  Este filtrado previo elimina
+genes con baja expresión que inflarían la carga de pruebas múltiples y reducirían la
+potencia estadística.  La función puede manejar hasta tres comparaciones pareadas
+simultáneamente y devuelve una lista nombrada con los data frames filtrados y la unión de
+los IDs de genes detectables.
+
+```{r detect-filter}
+?detect_filter
+
+# Construir un data frame de resultados tipo DESeq2 a partir de valores TPM
+# (en la práctica esto proviene de DESeq2::results())
+tumor_ids  <- sampledata$patient_id[sampledata$sample_type == "tumor"]
+normal_ids <- sampledata$patient_id[sampledata$sample_type == "normal"]
+
+# Asegurar alineación de nombres de columna
+tumor_ids  <- tumor_ids[tumor_ids  %in% colnames(tpm_matrix)]
+normal_ids <- normal_ids[normal_ids %in% colnames(tpm_matrix)]
+
+mean_tumor  <- rowMeans(tpm_matrix[, tumor_ids,  drop = FALSE])
+mean_normal <- rowMeans(tpm_matrix[, normal_ids, drop = FALSE])
+
+# Simular un data frame de resultados DEA
+set.seed(1)
+deseq_sim <- data.frame(
+  ensembl        = rownames(tpm_matrix),
+  baseMean       = rowMeans(tpm_matrix),
+  log2FoldChange = log2((mean_tumor + 1) / (mean_normal + 1)),
+  pvalue         = runif(nrow(tpm_matrix)),
+  padj           = p.adjust(runif(nrow(tpm_matrix)), method = "BH"),
+  stringsAsFactors = FALSE
+)
+rownames(deseq_sim) <- deseq_sim$ensembl
+
+# Genes detectables: baseMean > 50, media grupal > 50, |L2FC| > 0
+detectable <- detect_filter(
+  norm.counts        = as.data.frame(tpm_matrix),
+  df.BvsA            = deseq_sim,
+  samples.baseline   = normal_ids,
+  samples.condition1 = tumor_ids,
+  cutoffs            = c(50, 50, 0)
+)
+
+cat("Genes detectables:", length(detectable$DetectGenes), "\n")
+```
+
+```{r validate-detect}
+stopifnot(exists("detectable"))
+stopifnot("DetectGenes" %in% names(detectable))
+stopifnot("Comparison1" %in% names(detectable))
+stopifnot(is.character(detectable$DetectGenes))
+```
+
+## 2.6 Reducción de Dimensionalidad
+
+### PCA, t-SNE y UMAP – diferencias conceptuales
+
+| Método | Idea principal | Preserva | Cuándo usarlo |
+|--------|---------------|----------|---------------|
+| **PCA** | Rotación lineal que maximiza la varianza explicada por ejes ortogonales sucesivos | Estructura global, varianza | Primera exploración; ejes interpretables (PC1 captura la mayor varianza) |
+| **t-SNE** | Minimiza la divergencia KL entre distribuciones de vecindad de alta y baja dimensión | Estructura local | Revelar clústeres finos; los ejes no tienen significado biológico directo; sensible al parámetro `perplexity` |
+| **UMAP** | Aprendizaje de variedades basado en grafos (estructura topológica difusa) | Estructura local *y* parte de la global | Más rápido que t-SNE en grandes conjuntos; generalmente preferido cuando importan tanto los clústeres locales como las relaciones entre clústeres |
+
+### 2.6.1 PCA
+
+```{r nice-pca}
+?nice_PCA
+
+# Preparar anotaciones a nivel de muestra (columna id requerida)
+annot_pca <- data.frame(
+  id          = colnames(tpm_matrix),
+  sample_type = sampledata$sample_type[match(colnames(tpm_matrix), sampledata$patient_id)],
+  stringsAsFactors = FALSE
+)
+
+nice_PCA(
+  object       = tpm_matrix,
+  annotations  = annot_pca,
+  PCs          = c(1, 2),
+  ntop         = 500,
+  variables    = c(fill = "sample_type"),
+  legend_names = c(fill = "Tipo de Muestra"),
+  colors       = c("tumor" = "#E74C3C", "normal" = "#2ECC71"),
+  shapes       = 21,
+  size         = 5,
+  title        = "PCA – TCGA-LUAD",
+  transform    = TRUE
+)
+```
+
+### 2.6.2 t-SNE
+
+```{r nice-tsne}
+?nice_tSNE
+
+nice_tSNE(
+  object         = tpm_matrix,
+  annotations    = annot_pca,
+  perplexity     = 3,
+  max_iterations = 500,
+  seed           = 42,
+  variables      = c(fill = "sample_type"),
+  legend_names   = c(fill = "Tipo de Muestra"),
+  colors         = c("tumor" = "#E74C3C", "normal" = "#2ECC71"),
+  shapes         = 21,
+  size           = 5,
+  title          = "t-SNE – TCGA-LUAD",
+  transform      = TRUE
+)
+```
+
+### 2.6.3 UMAP
+
+```{r nice-umap}
+?nice_UMAP
+
+nice_UMAP(
+  object       = tpm_matrix,
+  annotations  = annot_pca,
+  neighbors    = 5,
+  components   = 2,
+  epochs       = 200,
+  seed         = 42,
+  variables    = c(fill = "sample_type"),
+  legend_names = c(fill = "Tipo de Muestra"),
+  colors       = c("tumor" = "#E74C3C", "normal" = "#2ECC71"),
+  shapes       = 21,
+  size         = 5,
+  title        = "UMAP – TCGA-LUAD",
+  transform    = TRUE
+)
+```
+
+## 2.7 Gráfico Violín-Dispersión-Caja (VSB)
+
+`nice_VSB()` superpone puntos individuales sobre un gráfico de violín + caja para un
+gen específico — ideal para comunicar distribuciones de expresión entre grupos.
+
+```{r nice-vsb}
+?nice_VSB
+
+# Construir una matriz tipo VST (log2-TPM para demostración)
+vst_matrix <- log2(tpm_matrix + 1)
+
+# Usar solo muestras con sample_type conocido
+annot_vsb <- data.frame(
+  id          = colnames(vst_matrix),
+  sample_type = sampledata$sample_type[match(colnames(vst_matrix), sampledata$patient_id)],
+  stringsAsFactors = FALSE
+)
+annot_vsb <- annot_vsb[!is.na(annot_vsb$sample_type), ]
+vst_sub   <- vst_matrix[, annot_vsb$id, drop = FALSE]
+
+# Seleccionar un gen presente
+gene_of_interest <- rownames(vst_sub)[1]
+
+nice_VSB(
+  object     = vst_sub,
+  annotations= annot_vsb,
+  variables  = c(fill = "sample_type"),
+  genename   = gene_of_interest,
+  symbol     = "",
+  labels     = c("N", "T"),
+  categories = c("normal", "tumor"),
+  colors     = c("normal" = "#2ECC71", "tumor" = "#E74C3C"),
+  shapes     = 21,
+  markersize = 3,
+  alpha      = 0.8,
+  jitter     = 0.15
+)
+```
+
+## 2.8 Gráfico Volcán
+
+El gráfico Volcán muestra simultáneamente el fold-change (eje x) y la significación
+estadística (eje y, −log₁₀ FDR), facilitando la identificación de genes con cambios
+grandes y significativos.
+
+```{r nice-volcano}
+?nice_Volcano
+
+# Agregar símbolos de genes para etiquetado
+deseq_sim$symbol <- annotations_stub$symbol[
+  match(deseq_sim$ensembl, annotations_stub$geneID)
+]
+# Reemplazar padj NA con 1
+deseq_sim$padj[is.na(deseq_sim$padj)] <- 1
+
+nice_Volcano(
+  results   = deseq_sim,
+  x_var     = "log2FoldChange",
+  y_var     = "padj",
+  label_var = "symbol",
+  cutoff_x  = 1,
+  cutoff_y  = 0.05,
+  x_range   = 6,
+  y_max     = 6,
+  title     = "Volcán – Tumor vs Normal",
+  colors    = c("red", "grey70", "blue"),
+  legend    = TRUE
+)
+```
+
+## 2.9 Guardar Resultados
+
+`save_results()` escribe tres archivos Excel a partir de un data frame de resultados DEA:
+todos los genes, genes sobreexpresados y genes subexpresados.
+
+```{r save-results, eval=FALSE}
+?save_results
+
+# OPCIONAL – escribe archivos Excel en el directorio de trabajo
+# save_results(
+#   df           = deseq_sim,
+#   name         = "TumorVsNormal",
+#   l2fc         = 1,
+#   cutoff_alpha = 0.05
+# )
+```
+
+## 2.10 Separar Casos
+
+`split_cases()` divide los genes de tres comparaciones pareadas en hasta diez categorías
+mutuamente excluyentes de patrones de expresión.
+
+```{r split-cases, eval=FALSE}
+?split_cases
+
+# OPCIONAL – requiere tres data frames de resultados DESeq2
+# casos <- split_cases(
+#   df.BvsA             = res_TumorVsNormal,
+#   df.CvsA             = res_MetVsNormal,
+#   df.BvsC             = res_TumorVsMet,
+#   unique_id           = "ensembl",
+#   significance_var    = "padj",
+#   significance_cutoff = 0.05,
+#   change_var          = "log2FoldChange",
+#   change_cutoff       = 1
+# )
+```
+
+## 2.11 Gráfico de Supervivencia Kaplan-Meier
+
+`nice_KM()` ajusta y grafica curvas de supervivencia Kaplan-Meier estratificadas por una
+variable binaria de expresión génica.
+
+```{r nice-km, eval=FALSE}
+?nice_KM
+
+# OPCIONAL – requiere los paquetes survival y survminer
+# km_data <- data.frame(
+#   TP53_muts  = c(rep("Yes", 15), rep("No", 17)),
+#   OS_time    = c(sample(100:2000, 15), sample(500:3000, 17)),
+#   OS_event   = sample(0:1, 32, replace = TRUE)
+# )
+# nice_KM(
+#   data      = km_data,
+#   gene      = "TP53_muts",
+#   time_var  = "OS_time",
+#   event_var = "OS_event"
+# )
+```
+
+---
+
+# 3 – Flujo de Análisis de Rutas
+
+## 3.1 Combinar Archivos de Salida GSEA
+
+Después de ejecutar GSEA (p. ej. mediante `GSEA_all.sh`), `merge_GSEA()` lee todos los
+archivos `.tsv` de resultados en un directorio y los combina en un único data frame ordenado.
+
+```{r merge-gsea, eval=FALSE}
+?merge_GSEA
+
+# OPCIONAL – requiere un directorio con archivos .tsv de resultados GSEA
+# gsea_merged <- merge_GSEA(
+#   input_directory = "ruta/a/resultados_gsea/",
+#   output_file     = "collections_merged_gsea_data.tsv"
+# )
+```
+
+## 3.2 Gráfico de Barras GSEA
+
+`barplot_GSEA()` genera un gráfico de barras facetado de valores NES coloreados por
+−log₁₀(FDR).
+
+```{r barplot-gsea-demo}
+?barplot_GSEA
+
+# Simular un data frame mínimo tipo GSEA
+gsea_demo <- data.frame(
+  New_name    = rep(c("Hallmarks", "Reactome"), each = 6),
+  datatype    = rep(c("TumorVsNormal", "MetVsNormal"), 6),
+  NES         = c(1.8, -1.5, 2.1, -1.2, 1.4, -1.9, 1.6, -1.3, 2.0, -1.7, 1.1, -2.0),
+  `-Log10FDR` = runif(12, 1, 5),
+  stringsAsFactors = FALSE
+)
+
+custom_lbl <- c(
+  TumorVsNormal = expression("Tumor vs Normal"),
+  MetVsNormal   = expression("Met vs Normal")
+)
+
+barplot_GSEA(
+  data          = gsea_demo,
+  output_path   = tempfile(fileext = ".svg"),
+  custom_labels = custom_lbl,
+  axis_y        = "NES"
+)
+```
+
+## 3.3 Gráfico Global GSEA (`plot_GSEA`)
+
+`plot_GSEA()` genera un gráfico de barras facetado para múltiples comparaciones o un
+panel único con etiquetas de rutas y anotaciones de colecciones MSigDB.
+
+```{r plot-gsea-demo}
+?plot_GSEA
+
+# Modo multi-comparación (columna Comparison con >1 valor único)
+gsea_multi <- data.frame(
+  Comparison  = rep(c("TumorVsNormal", "MetVsNormal"), 6),
+  New_name    = rep(c("Hallmarks", "Reactome", "GO"), 4),
+  NES         = c(1.8, -1.5, 2.1, -1.2, 1.4, -1.9, 1.6, -1.3, 2.0, -1.7, 1.1, -2.0),
+  FDR         = runif(12, 0.001, 0.05),
+  stringsAsFactors = FALSE
+)
+
+plot_GSEA(
+  data        = gsea_multi,
+  Comparison  = "Comparison",
+  axis_y      = "NES",
+  fdr_col     = "FDR",
+  logFDR      = TRUE,
+  order       = "desc",
+  ncol_wrap   = 2,
+  free_y      = TRUE
+)
+```
+
+---
+
+# 4 – Flujo de Clustering de Rutas
+
+## 4.1 Heatmap de Genes del Leading Edge
+
+`heatmap_GSEA()` lee datos de expresión, metadatos, definiciones de gene sets (GMT) y
+salidas GSEA para generar heatmaps de los genes del *leading edge* por ruta.  Esta función
+escribe archivos PDF y JPEG en disco y requiere archivos de entrada locales.
+
+```{r heatmap-gsea, eval=FALSE}
+?heatmap_GSEA
+
+# OPCIONAL – requiere archivos locales de salida GSEA
+# heatmap_GSEA(
+#   main_dir          = "ruta/al/proyecto/",
+#   expression_file   = "expression_matrix.txt",
+#   metadata_file     = "metadata.xlsx",
+#   gmt_file          = "gene_sets.gmt",
+#   ranked_genes_file = "ranked_genes.rnk",
+#   gsea_file         = "gsea_results.tsv",
+#   output_dir        = "leading_edge_heatmaps",
+#   sample_col        = "Sample",
+#   group_col         = "group",
+#   save_dataframe    = TRUE
+# )
+```
+
+---
+
+# 5 – Resumen de Validaciones
+
+El bloque siguiente re-verifica los objetos clave producidos por los bloques ejecutables.
+
+```{r validation-summary}
+# Objetos principales del flujo DEA
+stopifnot(exists("raw_counts"))
+stopifnot(exists("sampledata"))
+stopifnot(exists("annotations_stub"))
+stopifnot(exists("tpm_matrix"))
+stopifnot(exists("detectable"))
+stopifnot(exists("deseq_sim"))
+stopifnot(exists("pa"))
+
+# Verificaciones estructurales
+stopifnot(is.data.frame(sampledata))
+stopifnot(is.numeric(tpm_matrix))
+stopifnot(all(abs(colSums(tpm_matrix) - 1e6) < 1))
+stopifnot("DetectGenes" %in% names(detectable))
+stopifnot(is.numeric(pa$min_sample_size))
+
+message("Todas las verificaciones de validación pasaron.")
+```
+
+---
+
+# Información de Sesión
+
+```{r session-info}
+sessionInfo()
+```

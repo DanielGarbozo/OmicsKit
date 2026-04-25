@@ -1,0 +1,608 @@
+---
+title: "OmicsKit Full Tutorial – DEA, Pathway Analysis & Pathway Clustering"
+author: "OmicsKit Team"
+date: "`r Sys.Date()`"
+output:
+  rmarkdown::html_vignette:
+    toc: true
+    toc_depth: 3
+vignette: >
+  %\VignetteIndexEntry{OmicsKit Full Tutorial – DEA, Pathway Analysis & Pathway Clustering}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  collapse  = TRUE,
+  comment   = "#>",
+  warning   = FALSE,
+  message   = FALSE,
+  eval      = TRUE,
+  fig.width = 7,
+  fig.height = 5
+)
+```
+
+# Overview
+
+This tutorial covers the three main analytical workflows implemented in **OmicsKit**:
+
+1. **Differential Expression Analysis (DEA) Workflow** – from raw counts to visualisation.
+2. **Pathway Analysis Workflow** – GSEA result processing and plotting.
+3. **Pathway Clustering Workflow** – leading-edge heatmaps and gene-set clustering.
+
+All examples use the TCGA-LUAD datasets (`raw_counts` and `sampledata`) shipped with the package.  
+Functions that require external files (e.g. `merge_GSEA`, `heatmap_GSEA`) are wrapped in optional,
+clearly-labelled code blocks.
+
+---
+
+# 1 – Load package and data
+
+```{r load-package}
+library(OmicsKit)
+
+# Package datasets
+data("raw_counts")   # integer matrix: genes × samples
+data("sampledata")   # data frame: sample metadata
+
+# Quick look
+dim(raw_counts)
+head(sampledata[, 1:5])
+```
+
+---
+
+# 2 – DEA Workflow
+
+## 2.1 Power Analysis
+
+Before committing resources to an experiment it is important to estimate the minimum
+number of replicates needed to detect a biologically meaningful effect with sufficient
+confidence.  `power_analysis()` implements the analytical framework described by
+Hart *et al.* (2013, *RNA* **20**: 1684–1696).
+
+**Statistical background (Hart *et al.* 2013):**
+
+The approach models RNA-seq counts with a Negative Binomial distribution whose
+variance is parameterised by a *dispersion* coefficient (biological coefficient of
+variation squared, σ²). For a two-group comparison (treatment vs. control), the
+standard error of the log₂-fold-change estimator is:
+
+$$SE = \sqrt{\frac{2\,\sigma^2}{n}}$$
+
+where *n* is the number of replicates per group. Under this model the non-centrality
+parameter that governs statistical power is:
+
+$$z_{\text{effect}} = \frac{|\Delta|}{SE} = \frac{|\Delta|}{\sqrt{2\,\sigma^2 / n}}$$
+
+Because thousands of genes are tested simultaneously, a multiple-testing correction
+must be applied. Hart *et al.* advocate controlling the **False Discovery Rate (FDR)**
+via a Bonferroni-like adjustment on the null genes:
+
+$$z_\alpha = \Phi^{-1}\!\left(1 - \frac{\alpha}{2\,m_0}\right)$$
+
+where *m*₀ is the number of truly non-differentially expressed genes and Φ⁻¹ is the
+normal quantile function. The realised power at sample size *n* is then:
+
+$$\pi(n) = \Phi\!\left(z_{\text{effect}} - z_\alpha\right) + \Phi\!\left(-z_{\text{effect}} - z_\alpha\right)$$
+
+`power_analysis()` sweeps *n* from 2 to `max_n`, computes π(*n*) at each point, and
+reports the minimum *n* that meets the `power_target`.  The red dashed line marks the
+desired power; the blue dashed line marks the minimum sufficient sample size.
+
+```{r power-analysis}
+?power_analysis
+
+pa <- power_analysis(
+  effect_size  = 1,       # log2 fold-change to detect
+  dispersion   = 0.1,     # biological variance (σ²)
+  n_genes      = 20000,   # total genes tested
+  prop_de      = 0.05,    # expected proportion of DE genes
+  alpha        = 0.05,    # desired FDR
+  power_target = 0.8,     # desired power (1 – β)
+  max_n        = 20,      # max sample size to explore
+  plot         = TRUE
+)
+
+cat("Minimum sample size per group:", pa$min_sample_size, "\n")
+```
+
+```{r validate-pa}
+stopifnot(exists("pa"))
+stopifnot(is.list(pa))
+stopifnot("min_sample_size" %in% names(pa))
+stopifnot("power_table"     %in% names(pa))
+stopifnot(is.numeric(pa$min_sample_size))
+```
+
+## 2.2 Get Annotations
+
+`get_annotations()` queries Ensembl BioMart to retrieve gene metadata (symbol,
+biotype, chromosome, length) for a vector of Ensembl IDs.  It requires internet
+access and the `biomaRt` package.
+
+```{r get-annotations, eval=FALSE}
+?get_annotations
+
+# OPTIONAL – requires internet access and the biomaRt package
+# annotations <- get_annotations(
+#   ensembl_ids = rownames(raw_counts),
+#   mode        = "genes",
+#   version     = "Current",
+#   filename    = "gene_annotations",
+#   format      = "csv"
+# )
+```
+
+For the remainder of this tutorial we use a minimal annotations stub so that all
+downstream chunks run without internet access.
+
+```{r annotations-stub}
+# Minimal stub: symbol and gene_length columns required by tpm() and add_annotations()
+set.seed(42)
+annotations_stub <- data.frame(
+  geneID      = rownames(raw_counts),
+  symbol      = paste0("Gene_", seq_len(nrow(raw_counts))),
+  gene_length = sample(500:5000, nrow(raw_counts), replace = TRUE),
+  stringsAsFactors = FALSE
+)
+rownames(annotations_stub) <- annotations_stub$geneID
+```
+
+## 2.3 Add Annotations
+
+`add_annotations()` left-joins annotation columns from a reference table into a
+counts matrix using the Ensembl ID as the key.
+
+```{r add-annotations}
+?add_annotations
+
+# Add symbol and length to the counts matrix
+counts_ann <- add_annotations(
+  object     = raw_counts,
+  reference  = annotations_stub,
+  variables  = c("symbol", "gene_length"),
+  data_frame = TRUE
+)
+
+head(counts_ann[, c("geneID", "symbol", "gene_length", colnames(raw_counts)[1:2])])
+```
+
+```{r validate-ann}
+stopifnot(exists("counts_ann"))
+stopifnot("symbol"      %in% colnames(counts_ann))
+stopifnot("gene_length" %in% colnames(counts_ann))
+```
+
+## 2.4 TPM Normalisation
+
+TPM (Transcripts Per Million) removes library-size and gene-length biases,
+making expression values comparable both within and across samples.
+
+```{r tpm-norm}
+?tpm
+
+tpm_matrix <- tpm(
+  raw_counts   = raw_counts,
+  gene_lengths = annotations_stub$gene_length
+)
+
+# Verify column sums ≈ 1 × 10⁶
+round(colSums(tpm_matrix)[1:3])
+```
+
+```{r validate-tpm}
+stopifnot(exists("tpm_matrix"))
+stopifnot(nrow(tpm_matrix) == nrow(raw_counts))
+stopifnot(ncol(tpm_matrix) == ncol(raw_counts))
+# Each column should sum to ~1e6
+stopifnot(all(abs(colSums(tpm_matrix) - 1e6) < 1))
+```
+
+## 2.5 Detect & Filter Expressed Genes
+
+`detect_filter()` identifies genes that are reliably detectable: a gene is retained
+if its **baseMean** (average normalised count across all samples) and its **group mean**
+(mean in the more-expressed group) both exceed a user-defined threshold, *and* its
+|log₂FC| is above a minimum fold-change floor.  This pre-filtering step removes lowly
+expressed genes that would otherwise inflate the multiple-testing burden and decrease
+power.  The function can handle up to three pairwise comparisons simultaneously and
+returns a named list containing the filtered result data frames and the union of
+detectable gene IDs.
+
+```{r detect-filter}
+?detect_filter
+
+# Build a minimal DESeq2-like result data frame from TPM values
+# (in practice this comes from DESeq2::results())
+tumor_ids  <- sampledata$patient_id[sampledata$sample_type == "tumor"]
+normal_ids <- sampledata$patient_id[sampledata$sample_type == "normal"]
+
+# Ensure column name alignment
+tumor_ids  <- tumor_ids[tumor_ids  %in% colnames(tpm_matrix)]
+normal_ids <- normal_ids[normal_ids %in% colnames(tpm_matrix)]
+
+mean_tumor  <- rowMeans(tpm_matrix[, tumor_ids,  drop = FALSE])
+mean_normal <- rowMeans(tpm_matrix[, normal_ids, drop = FALSE])
+
+# Simulate a DEA result data frame
+set.seed(1)
+deseq_sim <- data.frame(
+  ensembl        = rownames(tpm_matrix),
+  baseMean       = rowMeans(tpm_matrix),
+  log2FoldChange = log2((mean_tumor + 1) / (mean_normal + 1)),
+  pvalue         = runif(nrow(tpm_matrix)),
+  padj           = p.adjust(runif(nrow(tpm_matrix)), method = "BH"),
+  stringsAsFactors = FALSE
+)
+rownames(deseq_sim) <- deseq_sim$ensembl
+
+# Detectable genes: baseMean > 50, group mean > 50, |L2FC| > 0
+detectable <- detect_filter(
+  norm.counts       = as.data.frame(tpm_matrix),
+  df.BvsA           = deseq_sim,
+  samples.baseline  = normal_ids,
+  samples.condition1= tumor_ids,
+  cutoffs           = c(50, 50, 0)
+)
+
+cat("Detectable genes:", length(detectable$DetectGenes), "\n")
+```
+
+```{r validate-detect}
+stopifnot(exists("detectable"))
+stopifnot("DetectGenes"  %in% names(detectable))
+stopifnot("Comparison1"  %in% names(detectable))
+stopifnot(is.character(detectable$DetectGenes))
+```
+
+## 2.6 Dimensionality Reduction
+
+### PCA, t-SNE and UMAP – conceptual differences
+
+| Method | Core idea | Preserves | When to use |
+|--------|-----------|-----------|-------------|
+| **PCA** | Linear rotation that maximises variance explained by successive orthogonal axes | Global structure, variance | First pass; interpretable axes (PC1 captures most variance) |
+| **t-SNE** | Minimises KL-divergence between high- and low-dimensional neighbourhood distributions | Local structure | Revealing fine clusters; axes have no direct biological meaning; sensitive to `perplexity` |
+| **UMAP** | Graph-based manifold learning (fuzzy topological structure) | Both local *and* some global structure | Faster than t-SNE on large datasets; generally preferred when both local clusters and inter-cluster relationships matter |
+
+### 2.6.1 PCA
+
+```{r nice-pca}
+?nice_PCA
+
+# Prepare sample-level annotation (id column required)
+annot_pca <- data.frame(
+  id          = colnames(tpm_matrix),
+  sample_type = sampledata$sample_type[match(colnames(tpm_matrix), sampledata$patient_id)],
+  stringsAsFactors = FALSE
+)
+
+nice_PCA(
+  object       = tpm_matrix,
+  annotations  = annot_pca,
+  PCs          = c(1, 2),
+  ntop         = 500,
+  variables    = c(fill = "sample_type"),
+  legend_names = c(fill = "Sample Type"),
+  colors       = c("tumor" = "#E74C3C", "normal" = "#2ECC71"),
+  shapes       = 21,
+  size         = 5,
+  title        = "PCA – TCGA-LUAD",
+  transform    = TRUE
+)
+```
+
+### 2.6.2 t-SNE
+
+```{r nice-tsne}
+?nice_tSNE
+
+nice_tSNE(
+  object       = tpm_matrix,
+  annotations  = annot_pca,
+  perplexity   = 3,
+  max_iterations = 500,
+  seed         = 42,
+  variables    = c(fill = "sample_type"),
+  legend_names = c(fill = "Sample Type"),
+  colors       = c("tumor" = "#E74C3C", "normal" = "#2ECC71"),
+  shapes       = 21,
+  size         = 5,
+  title        = "t-SNE – TCGA-LUAD",
+  transform    = TRUE
+)
+```
+
+### 2.6.3 UMAP
+
+```{r nice-umap}
+?nice_UMAP
+
+nice_UMAP(
+  object       = tpm_matrix,
+  annotations  = annot_pca,
+  neighbors    = 5,
+  components   = 2,
+  epochs       = 200,
+  seed         = 42,
+  variables    = c(fill = "sample_type"),
+  legend_names = c(fill = "Sample Type"),
+  colors       = c("tumor" = "#E74C3C", "normal" = "#2ECC71"),
+  shapes       = 21,
+  size         = 5,
+  title        = "UMAP – TCGA-LUAD",
+  transform    = TRUE
+)
+```
+
+## 2.7 Violin-Scatter-Box (VSB) Plot
+
+`nice_VSB()` overlays individual data points on a violin+box plot for a single
+gene — ideal for communicating expression distributions across groups.
+
+```{r nice-vsb}
+?nice_VSB
+
+# Build a minimal VST-like matrix (log2-TPM here for demonstration)
+vst_matrix <- log2(tpm_matrix + 1)
+
+# Use only samples with known sample_type
+annot_vsb <- data.frame(
+  id          = colnames(vst_matrix),
+  sample_type = sampledata$sample_type[match(colnames(vst_matrix), sampledata$patient_id)],
+  stringsAsFactors = FALSE
+)
+annot_vsb <- annot_vsb[!is.na(annot_vsb$sample_type), ]
+vst_sub   <- vst_matrix[, annot_vsb$id, drop = FALSE]
+
+# Pick a gene that is present
+gene_of_interest <- rownames(vst_sub)[1]
+
+nice_VSB(
+  object     = vst_sub,
+  annotations= annot_vsb,
+  variables  = c(fill = "sample_type"),
+  genename   = gene_of_interest,
+  symbol     = "",
+  labels     = c("N", "T"),
+  categories = c("normal", "tumor"),
+  colors     = c("normal" = "#2ECC71", "tumor" = "#E74C3C"),
+  shapes     = 21,
+  markersize = 3,
+  alpha      = 0.8,
+  jitter     = 0.15
+)
+```
+
+## 2.8 Volcano Plot
+
+The Volcano plot simultaneously displays fold-change (x-axis) and statistical
+significance (y-axis, −log₁₀ FDR), making it easy to identify genes with both
+large and significant changes.
+
+```{r nice-volcano}
+?nice_Volcano
+
+# Add gene symbols for labelling
+deseq_sim$symbol <- annotations_stub$symbol[
+  match(deseq_sim$ensembl, annotations_stub$geneID)
+]
+# Replace NA padj with 1
+deseq_sim$padj[is.na(deseq_sim$padj)] <- 1
+
+nice_Volcano(
+  results   = deseq_sim,
+  x_var     = "log2FoldChange",
+  y_var     = "padj",
+  label_var = "symbol",
+  cutoff_x  = 1,
+  cutoff_y  = 0.05,
+  x_range   = 6,
+  y_max     = 6,
+  title     = "Volcano – Tumor vs Normal",
+  colors    = c("red", "grey70", "blue"),
+  legend    = TRUE
+)
+```
+
+## 2.9 Save Results
+
+`save_results()` writes three Excel files from a DEA result data frame: all genes,
+up-regulated, and down-regulated genes.
+
+```{r save-results, eval=FALSE}
+?save_results
+
+# OPTIONAL – writes Excel files to the working directory
+# save_results(
+#   df           = deseq_sim,
+#   name         = "TumorVsNormal",
+#   l2fc         = 1,
+#   cutoff_alpha = 0.05
+# )
+```
+
+## 2.10 Split Cases
+
+`split_cases()` partitions genes from three pairwise comparisons into up to ten
+mutually exclusive expression-pattern categories.
+
+```{r split-cases, eval=FALSE}
+?split_cases
+
+# OPTIONAL – requires three DESeq2 result data frames
+# cases <- split_cases(
+#   df.BvsA              = res_TumorVsNormal,
+#   df.CvsA              = res_MetastasisVsNormal,
+#   df.BvsC              = res_TumorVsMetastasis,
+#   unique_id            = "ensembl",
+#   significance_var     = "padj",
+#   significance_cutoff  = 0.05,
+#   change_var           = "log2FoldChange",
+#   change_cutoff        = 1
+# )
+```
+
+## 2.11 Kaplan-Meier Survival Plot
+
+`nice_KM()` fits and plots Kaplan-Meier survival curves stratified by a binary
+gene-expression variable.
+
+```{r nice-km, eval=FALSE}
+?nice_KM
+
+# OPTIONAL – requires survival and survminer packages
+# km_data <- data.frame(
+#   TP53_muts  = c(rep("Yes", 15), rep("No", 17)),
+#   OS_time    = c(sample(100:2000, 15), sample(500:3000, 17)),
+#   OS_event   = sample(0:1, 32, replace = TRUE)
+# )
+# nice_KM(
+#   data      = km_data,
+#   gene      = "TP53_muts",
+#   time_var  = "OS_time",
+#   event_var = "OS_event"
+# )
+```
+
+---
+
+# 3 – Pathway Analysis Workflow
+
+## 3.1 Merge GSEA Output Files
+
+After running GSEA (e.g., via `GSEA_all.sh`), `merge_GSEA()` reads all `.tsv` result
+files in a directory and combines them into a single tidy data frame.
+
+```{r merge-gsea, eval=FALSE}
+?merge_GSEA
+
+# OPTIONAL – requires a directory with GSEA .tsv result files
+# gsea_merged <- merge_GSEA(
+#   input_directory = "path/to/gsea_results/",
+#   output_file     = "collections_merged_gsea_data.tsv"
+# )
+```
+
+## 3.2 GSEA Bar Plot
+
+`barplot_GSEA()` creates a faceted bar chart of NES values coloured by −log₁₀(FDR).
+
+```{r barplot-gsea-demo}
+?barplot_GSEA
+
+# Simulate a minimal GSEA-like data frame
+gsea_demo <- data.frame(
+  New_name    = rep(c("Hallmarks", "Reactome"), each = 6),
+  datatype    = rep(c("TumorVsNormal", "MetVsNormal"), 6),
+  NES         = c(1.8, -1.5, 2.1, -1.2, 1.4, -1.9, 1.6, -1.3, 2.0, -1.7, 1.1, -2.0),
+  `-Log10FDR` = runif(12, 1, 5),
+  stringsAsFactors = FALSE
+)
+
+custom_lbl <- c(
+  TumorVsNormal = expression("Tumor vs Normal"),
+  MetVsNormal   = expression("Met vs Normal")
+)
+
+barplot_GSEA(
+  data          = gsea_demo,
+  output_path   = tempfile(fileext = ".svg"),
+  custom_labels = custom_lbl,
+  axis_y        = "NES"
+)
+```
+
+## 3.3 Global GSEA Plot (`plot_GSEA`)
+
+`plot_GSEA()` generates either a faceted multi-comparison bar chart or a single-comparison
+panel layout with pathway labels and MSigDB collection annotations.
+
+```{r plot-gsea-demo}
+?plot_GSEA
+
+# Multi-comparison mode (Comparison column has >1 unique value)
+gsea_multi <- data.frame(
+  Comparison  = rep(c("TumorVsNormal", "MetVsNormal"), 6),
+  New_name    = rep(c("Hallmarks", "Reactome", "GO"), 4),
+  NES         = c(1.8, -1.5, 2.1, -1.2, 1.4, -1.9, 1.6, -1.3, 2.0, -1.7, 1.1, -2.0),
+  FDR         = runif(12, 0.001, 0.05),
+  stringsAsFactors = FALSE
+)
+
+plot_GSEA(
+  data        = gsea_multi,
+  Comparison  = "Comparison",
+  axis_y      = "NES",
+  fdr_col     = "FDR",
+  logFDR      = TRUE,
+  order       = "desc",
+  ncol_wrap   = 2,
+  free_y      = TRUE
+)
+```
+
+---
+
+# 4 – Pathway Clustering Workflow
+
+## 4.1 Heatmap of Leading-Edge Genes
+
+`heatmap_GSEA()` reads expression data, metadata, GMT gene-set definitions, and GSEA
+output to generate per-pathway leading-edge heatmaps.  This function writes PDF and
+JPEG files to disk and therefore requires local input files.
+
+```{r heatmap-gsea, eval=FALSE}
+?heatmap_GSEA
+
+# OPTIONAL – requires local GSEA output files
+# heatmap_GSEA(
+#   main_dir         = "path/to/project/",
+#   expression_file  = "expression_matrix.txt",
+#   metadata_file    = "metadata.xlsx",
+#   gmt_file         = "gene_sets.gmt",
+#   ranked_genes_file= "ranked_genes.rnk",
+#   gsea_file        = "gsea_results.tsv",
+#   output_dir       = "leading_edge_heatmaps",
+#   sample_col       = "Sample",
+#   group_col        = "group",
+#   save_dataframe   = TRUE
+# )
+```
+
+---
+
+# 5 – Validation Summary
+
+The block below re-checks the key objects produced by the runnable chunks.
+
+```{r validation-summary}
+# Core objects from the DEA workflow
+stopifnot(exists("raw_counts"))
+stopifnot(exists("sampledata"))
+stopifnot(exists("annotations_stub"))
+stopifnot(exists("tpm_matrix"))
+stopifnot(exists("detectable"))
+stopifnot(exists("deseq_sim"))
+stopifnot(exists("pa"))
+
+# Structural checks
+stopifnot(is.data.frame(sampledata))
+stopifnot(is.numeric(tpm_matrix))
+stopifnot(all(abs(colSums(tpm_matrix) - 1e6) < 1))
+stopifnot("DetectGenes" %in% names(detectable))
+stopifnot(is.numeric(pa$min_sample_size))
+
+message("All validation checks passed.")
+```
+
+---
+
+# Session Information
+
+```{r session-info}
+sessionInfo()
+```
