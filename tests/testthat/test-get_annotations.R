@@ -1,6 +1,6 @@
 testthat::test_that("get_annotations returns expected columns for genes", {
   testthat::skip_if_not_installed("biomaRt")
-  testthat::skip_if_offline()
+  testthat::skip_if_offline("www.ensembl.org")
   testthat::skip_on_cran()
 
   ids <- c("ENSG00000141510") # TP53
@@ -19,7 +19,7 @@ testthat::test_that("get_annotations returns expected columns for genes", {
 
 testthat::test_that("get_annotations works for transcripts", {
   testthat::skip_if_not_installed("biomaRt")
-  testthat::skip_if_offline()
+  testthat::skip_if_offline("www.ensembl.org")
   testthat::skip_on_cran()
 
   # Obtener un transcript válido del release 112
