@@ -7,7 +7,7 @@ testthat::test_that("get_annotations returns expected columns for genes", {
   res <- get_annotations(
     ensembl_ids = ids,
     species     = "hsapiens_gene_ensembl",
-    version     = "current",
+    version     = "112",
     filename    = NULL
   )
 
