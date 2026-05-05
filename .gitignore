@@ -54,3 +54,5 @@ rsconnect/
 inst/doc
 docs
 .positai
+/doc/
+/Meta/
