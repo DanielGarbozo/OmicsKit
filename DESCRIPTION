@@ -55,12 +55,14 @@ Suggests:
     tidygraph,
     tidyr,
     tidyselect,
-    tm
+    tm,
+    testthat (>= 3.0.0),
+    withr
 Roxygen: list(markdown = TRUE)
 Depends: 
-    R (>= 3.5)
+    R (>= 4.4.0)
 LazyData: true
 LazyDataCompression: xz
 VignetteBuilder: knitr
 URL: https://bigmindlab.github.io/OmicsKit
-
+Config/testthat/edition: 3

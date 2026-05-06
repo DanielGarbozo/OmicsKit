@@ -8,6 +8,13 @@
 \description{
 This package contains functions that help in manipulating tables and generating plots for multi-omics analysis including genomics, transcriptomics, proteomics, methylomics and immunoinformatics.
 }
+\seealso{
+Useful links:
+\itemize{
+  \item \url{https://bigmindlab.github.io/OmicsKit}
+}
+
+}
 \author{
 \strong{Maintainer}: Daniel Guevara \email{dgdiaz011202@gmail.com} (\href{https://orcid.org/0009-0001-2786-8729}{ORCID})
 
