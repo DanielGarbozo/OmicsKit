@@ -67,7 +67,7 @@ In this vignette, we use a built-in example `geneset_list`, which contains
 immune response, and metabolism), and the built-in `gsea_results` dataset,
 which mimics the output of `merge_PA()` for three comparisons across HALLMARK,
 KEGG, and GO collections.
-```{r load_data}
+```{r load_data, eval = FALSE}
 data(geneset_list)
 data(gsea_results)
 data(deseq2_results)
