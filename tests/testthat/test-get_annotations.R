@@ -1,7 +1,11 @@
 testthat::test_that("get_annotations returns expected columns for genes", {
   testthat::skip_if_not_installed("biomaRt")
-  testthat::skip_if_offline("www.ensembl.org")
   testthat::skip_on_cran()
+
+  host <- .resolve_ensembl_host("112")
+  testthat::skip_if_offline(gsub("^https?://", "", host))
+  testthat::skip_on_ci()
+
 
   ids <- c("ENSG00000141510") # TP53
   res <- get_annotations(
@@ -19,13 +23,18 @@ testthat::test_that("get_annotations returns expected columns for genes", {
 
 testthat::test_that("get_annotations works for transcripts", {
   testthat::skip_if_not_installed("biomaRt")
-  testthat::skip_if_offline("www.ensembl.org")
   testthat::skip_on_cran()
+
+  host <- .resolve_ensembl_host("112")
+  testthat::skip_if_offline(gsub("^https?://", "", host))
+
 
   # Obtener un transcript válido del release 112
   ensembl <- biomaRt::useMart("ENSEMBL_MART_ENSEMBL",
                               dataset = "hsapiens_gene_ensembl",
-                              host = .resolve_ensembl_host("112"))
+                              host = host)
+
+
 
   ids <- biomaRt::getBM(
     attributes = "ensembl_transcript_id_version",
