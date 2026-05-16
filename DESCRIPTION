@@ -19,8 +19,10 @@ Encoding: UTF-8
 Imports:
     dplyr,
     ggplot2,
+    ggpubr,
     tsne,
     cowplot,
+    ggraph,
     graphics,
     magrittr,
     rlang,
@@ -48,7 +50,6 @@ Suggests:
     rmarkdown,
     DESeq2,
     ggnewscale,
-    ggraph,
     ggrepel,
     igraph,
     matrixStats,
